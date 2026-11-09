@@ -1,0 +1,26 @@
+{
+    "configurations": [
+        {
+            "name": "Linux Kernel",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/lib/modules/*/build/include",
+                "/lib/modules/*/build/include/uapi",
+                "/lib/modules/*/build/include/generated/uapi",
+                "/lib/modules/*/build/arch/x86/include",
+                "/lib/modules/*/build/arch/x86/include/uapi",
+                "/lib/modules/*/build/arch/x86/include/generated",
+                "/lib/modules/*/build/arch/x86/include/generated/uapi"
+            ],
+            "defines": [
+                "__KERNEL__",
+                "MODULE",
+                "KBUILD_MODNAME=\"crypto_module\""
+            ],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "gnu11",
+            "intelliSenseMode": "linux-gcc-x64"
+        }
+    ],
+    "version": 4
+}

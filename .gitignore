@@ -1,0 +1,15 @@
+..module-common.o.cmd
+.crypto_module.ko.cmd
+.crypto_module.mod.cmd
+.crypto_module.mod.o.cmd
+.crypto_module.o.cmd
+.module-common.o
+.Module.symvers.cmd
+.modules.order.cmd
+crypto_module.ko
+crypto_module.mod
+crypto_module.mod.c
+crypto_module.mod.o
+crypto_module.o
+Module.symvers
+modules.order
