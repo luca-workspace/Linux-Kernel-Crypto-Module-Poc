@@ -2,7 +2,9 @@
 
 A custom Linux kernel module implementing a character device (`/dev/crypto_hw`) that performs XOR encryption on data passed from user space.
 
-I built this project as a hands-on exploration of low-level OS architecture, specifically to understand how kernel-space memory management and synchronization primitives work under the hood. 
+I built this project as a hands-on exploration of low-level OS architecture, specifically to understand how kernel-space memory management and synchronization primitives work under the hood.
+
+<img src="imgs/sim.gif" width="500" alt="Preview">
 
 ## 🛠️ Technical Concepts Demonstrated
 Writing code in Ring 0 means no safety nets. This module implements:
