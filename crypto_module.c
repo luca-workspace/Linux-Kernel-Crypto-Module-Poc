@@ -316,11 +316,14 @@ static int __init crypto_init(void) {
      *  - dev_t dev: the first device number (dev_t) assigned to this device (combining major and minor numbers).
      *  - unsigned count: the number of minor numbers corresponding to this device.
      */
+
+    // By setting the owner of the cdev, the kernel prevents the use of "rmmod" while the device is still open. Without this,
+    // we could unload the module while a read operation is in progress, and cause the system to crash, which is why we set it
+    // BEFORE registering our device with the kernel (important in a high-traffic scenario).
+    crypto_cdev.owner = THIS_MODULE;
+  
     cdev_init(&crypto_cdev, &fops);
     result = cdev_add(&crypto_cdev, device_number, 1);
-    // By setting the owner of the cdev, the kernel prevents the use of "rmmod" while the device is still open. Without this,
-    // we could unload the module while a read operation is in progress, and cause the system to crash.
-    crypto_cdev.owner = THIS_MODULE;
 
     if (result < 0) {
         // Clean up if subsequent steps fail
@@ -370,6 +373,6 @@ module_exit(crypto_exit);
  * - cat /dev/crypto_hw
  * 
  * MODULE REMOVAL:
- * - sudo rmmod crypto_module.ko
+ * - sudo rmmod crypto_module
  * - sudo rm /dev/crypto_hw
 */
