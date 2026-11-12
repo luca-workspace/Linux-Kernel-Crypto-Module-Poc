@@ -11,17 +11,18 @@
  * Severity Guidance:
  *  - pr_err(): Critical failures that abort execution (e.g., alloc_chrdev_region fails).
  *  - pr_info(): Milestone events visible to sysadmins (e.g., successful driver load).
- *  - pr_debug(): Low-overhead troubleshooting strings (compiled out by default).
+ *  - pr_debug(): Low-overhead troubleshooting strings (disabled by default: they only appear if DEBUG
+ *      or dynamic debug is enabled).
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt  // Prefixes all pr_* logs with the module name
 
 // LIBRARIES
-#include <linux/fs.h>       // For alloc_chrdev_region function definition
+#include <linux/fs.h>       // For struct file_operations, alloc_chrdev_region and unregister_chrdev_region
 #include <linux/init.h>     // For __init and __exit macros
 #include <linux/module.h>   // Required for all modules, such as this same one
                             // Also required for module_init and module_exit
-#include <linux/kernel.h>   // Required for "KERN_INFO", which is a log level macro in the Linux kernel used with
-                            // the printk() logging function to designate an informational message (severity level 6)
+#include <linux/kernel.h>   // Common kernel helpers. It also pulls in the logging header (printk.h), which defines the
+                            // log level macros such as "KERN_INFO" (informational message, severity level 6)
 #include <linux/uaccess.h>  // Required for copy_from_user and copy_to_user functions
 #include <linux/slab.h>     // Required for dynamic memory allocation using kmalloc and kfree
 #include <linux/cdev.h>     // Required for cdev_init, cdev_add, struct cdev
@@ -45,10 +46,12 @@ static DEFINE_MUTEX(crypto_mutex);
 static ssize_t crypto_write(struct file *file, const char __user *user_buf, size_t count, loff_t *ppos);
 static ssize_t crypto_read(struct file *file, char __user *user_buf, size_t count, loff_t *ppos);
                         
-/* The Linux kernel is a strictly regulated open-source ecosystem. If you try to load a module without explicitly declaring
- * a compatible licence (usually the "GPL" one) in the code, the system will raise an alarm, flagging the kernel as "Tainted", and
- * When the kernel is "Tainted", it blocks access to many advanced internal functions as a safety measure, so we define the module
- * license, choosing "GPL" this time. 
+/* Every kernel module must declare its license. If you load a module without a GPL-compatible license, the kernel
+ * still loads it, but flags itself as "Tainted" (visible in dmesg and in /proc/sys/kernel/tainted). A tainted kernel
+ * is a signal for kernel developers that unverified code is running, so they are usually unwilling to investigate
+ * bug reports coming from it. More importantly, a non-GPL module is not allowed to use the internal functions and
+ * data that the kernel exports with EXPORT_SYMBOL_GPL, so loading it can fail with "Unknown symbol" errors.
+ * That's why we declare the module license, choosing "GPL" this time.
  */
 MODULE_LICENSE("GPL");
 
@@ -69,8 +72,10 @@ MODULE_LICENSE("GPL");
  * DEVICE DRIVER TYPE COMPARISON: CHARACTER vs. BLOCK DEVICES:
  * Feature:            Character Device (cdev)
  *   - Data Unit:       Stream of individual bytes
- *   - Access Pattern:  Sequential access only (no seeking backward/forward)
- *   - Kernel Buffering:No cache/buffer (direct data transfer)
+ *   - Access Pattern:  Typically a stream read in order. Seeking is optional: a driver may implement llseek
+ *                      (e.g., /dev/mem does), but most character devices don't
+ *   - Kernel Buffering:Not backed by the page cache or the block layer (the driver handles data directly,
+ *                      although it may buffer internally)
  *   - File Indicator:  Marked with a 'c' in ls -l /dev
  *   - Filesystem:      Cannot host a filesystem
  *   - Typical Hardware:Keyboards, mice, serial ports, custom sensors
@@ -94,7 +99,7 @@ MODULE_LICENSE("GPL");
  *      "dev_t" is an integer data type used to represent device IDs. It identifies a specific device
  *      or the filesystem/storage device where a file resides. However, it's not like any integer, but rather
  *      a 32-bit data type composed by:
- *          - the first 12 bits, representing the major number (which can be extracted through the MAJOR function);
+ *          - the first 12 bits, representing the major number (which can be extracted through the MAJOR macro);
  *          - the remaining 20 bits for the minor number.
  *      Note: you pass a static dev_t unassigned variable BY REFERENCE to the function and the function
  *      will modify the value on its own.)
@@ -119,35 +124,46 @@ static struct file_operations fops = {
     .write = crypto_write,
     // .open = crypto_open,    // We're not implementing it here
     // .release = crypto_close // We're not implementing it here
+
+    /* The kernel needs to know which module the device belongs to, so that it cannot allow the user to remove (rmmod)
+     * the module while someone is using it. If it were removed, the process would continue to call functions that no
+     * longer exist in memory, and the kernel would crash. That is why the "struct cdev" (the one we declare next,
+     * called "crypto_cdev") has an "owner" field: when a program opens our device "/dev/crypto_hw", the kernel checks
+     * the "owner" field and increments a counter ("this module is in use"). As long as the counter is above zero,
+     * "rmmod" returns "Module is in use".
+     */
+    .owner = THIS_MODULE,
 };
 
 static struct cdev crypto_cdev; // See explanation that follows the cdev_init and cdev_add functions
 
 /* OPERATIVE FUNCTIONS
- * These functions are the operative "core" of the module, and they directly intercept system calls (i.e., requests made
- * by applications in user space). When a user app calls "fread" or "fwrite" (which translate to "read()" and "write()" at OS level)
+ * These functions are the operative "core" of the module, and they handle the system calls (i.e., requests made
+ * by applications in user space). When a user app calls "read()" or "write()" (or "fread"/"fwrite", which end up calling them)
  * on our "crypto_hw" file, the kernel redirects the call to these functions (because we specified them in the "file_operations"
  * "map"). To ensure that the "file_operations" map accepts these functions, they must have exactly the signature specified in the
  * prototypes at the top of this file. The parameters they take are the same in both cases, with the exception that in crypto_write
  * our buffer is const, because we read user input without modifying it. Parameters are:
  *  - struct file *file: it's the pointer to the kernel struct representing our open "file" (device). In this module, we'll ignore it.
- *  - (const) char __user *user_buf: it's the pointer to the buffer in RAM (ring 3: user space). The "__user" tag works as a "warning":
- *      it's a compiler attribute indicating that the pointer originates from unsafe user space memory and must not be directly
- *      dereferenced (e.g., we can't do "char c = user_buf[0]"), because it points to an unsafe area of RAM (user space). The only way
- *      to use it is to pass it to "copy_from_user" or "copy_to_user" (see below).
- *  - size_t count: it's the exact number of bytes the user requested to read/write.
-*       - In the crypto_write function, it tells us how many bytes we have to extract from the user buffer (user_buf)
+ *  - (const) char __user *user_buf: it's the pointer to the buffer in RAM (ring 3: user space). The "__user" tag is an annotation
+ *      for "sparse", the kernel's static checker (gcc itself ignores it). It marks the pointer as coming from untrusted user space
+ *      memory, which must not be directly dereferenced (e.g., we can't do "char c = user_buf[0]"), because the address may be invalid,
+ *      swapped out or even malicious. The only way to use it is to pass it to "copy_from_user" or "copy_to_user" (see below).
+ *  - size_t count: it's the number of bytes the user requested to read/write.
+ *      - In the crypto_write function, it tells us how many bytes we have to extract from the user buffer (user_buf)
  *          using copy_from_user (and how much space to allocate using kmalloc).
- *      - In the crypto_read function, it tells us what the maximum number of bytes the app will accept is. If we encrypt 100 byte but the
- *          count is 50, we can only send 50 at a time.
+ *      - In the crypto_read function, it's the size of the buffer the app provided, i.e., the maximum number of bytes the app will accept.
+ *          A typical driver would copy at most "count" bytes and advance "*ppos", so that the app can fetch the rest with further reads.
+ *          This module is simpler: it always copies the whole message in one go, so if "count" is smaller than the message
+ *          (e.g., 50 vs. 100 bytes), we return -EINVAL rather than writing past the end of the user's buffer.
  *  - loff_t *ppos: it's a "pointer to position". It points to the current position (offset) of the "cursor" in the "file".
- *      It's there because if a file is 1000 bytes long and the app reads the first 10 bytes, the cursor moves to position 10. The next
- *      read operation will start from 10. The kernel passes this pointer to us so that we know where to start reading or writing.
- *      We'll ignore it.
+ *      A typical driver uses it to know where to resume: if a file is 1000 bytes long and the app reads the first 10 bytes, the cursor
+ *      moves to position 10, and the next read operation starts from there. This module ignores it: the message is consumed in full by
+ *      the first successful read, and any later read returns 0 (EOF) until something new is written.
  * 
  * Return type is ssize_t (signed size):
  *  - If the operation is successful, both functions must return the number of bytes processed (e.g. return count;). This number
- *      is then passed by the OS to the C++ application, which will then know that it has successfully read or written the data.
+ *      is then passed by the OS to the application, which will then know that it has successfully read or written the data.
  *  - If they fail (e.g. "copy_from_user" returns an error), they must return a negative number, which corresponds to the standard Linux
  *      error codes (e.g. "return -EFAULT;" for a memory access error).
  */
@@ -224,8 +240,9 @@ static ssize_t crypto_write(struct file *file, const char __user *user_buf, size
     // Save user input length
     message_size = count;
 
-    // Perform cryptographic task
-    // for loop which applies a XOR on each byte with a constant key
+    // Perform the "cryptographic" task: a for loop which applies a XOR on each byte with a constant key (1).
+    // Note that this only flips the lowest bit of each byte and is trivially reversible (applying it twice gives back the original):
+    // it's a placeholder to demonstrate the data flow between user and kernel space, not real encryption.
     for(size_t i = 0; i < count; i++) {
         crypto_buffer[i] = crypto_buffer[i] ^ 1;
     }
@@ -247,8 +264,8 @@ static ssize_t crypto_read(struct file *file, char __user *user_buf, size_t coun
         goto out;
     }
 
-    // If a program requests 5 bytes but the message contains 30, "copy_to_user" writes all 30 to its buffer; since it could be
-    // an issue, that triggers an error.
+    // If a program requests 5 bytes but the message contains 30, "copy_to_user" would write all 30 bytes past the end of its
+    // 5-byte buffer. Since this module doesn't support partial reads (see the note on "count" and "ppos" above), we refuse the read instead.
     if(count < message_size) {
         return_value = -EINVAL; // Invalid argument
         goto out;
@@ -301,9 +318,10 @@ static int __init crypto_init(void) {
 
     // Continue with cdev initialization only after success
     /* The cdev_init function initializes a struct cdev object by linking it to the driver's
-     * file operations (struct file_operations). It sets up the internal fields of the cdev structure
+     * file operations (struct file_operations). It first ZEROES the whole structure, then sets up its internal fields
      * and remembers the pointer to your fops (such as open, read, write, release), preparing the structure
-     * to be added to the system. It takes two parameters:
+     * to be added to the system. This means that any field you set BEFORE calling it (such as "owner") is lost.
+     * It takes two parameters:
      *  - struct cdev *cdev
      *  - const struct file_operations *fops)
      */
@@ -316,12 +334,6 @@ static int __init crypto_init(void) {
      *  - dev_t dev: the first device number (dev_t) assigned to this device (combining major and minor numbers).
      *  - unsigned count: the number of minor numbers corresponding to this device.
      */
-
-    // By setting the owner of the cdev, the kernel prevents the use of "rmmod" while the device is still open. Without this,
-    // we could unload the module while a read operation is in progress, and cause the system to crash, which is why we set it
-    // BEFORE registering our device with the kernel (important in a high-traffic scenario).
-    crypto_cdev.owner = THIS_MODULE;
-  
     cdev_init(&crypto_cdev, &fops);
     result = cdev_add(&crypto_cdev, device_number, 1);
 
